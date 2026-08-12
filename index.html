@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeatherBetter — forecast accuracy by zip code</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+    padding: 2rem 1rem 4rem;
+  }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; letter-spacing: -0.02em; }
+  .subtitle { color: var(--text-secondary); margin: 0.25rem 0 1.5rem; }
+  h2 { font-size: 1.05rem; margin: 2rem 0 0.75rem; }
+
+  form { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  input[type="text"] {
+    font: inherit; padding: 0.5rem 0.75rem; width: 11rem;
+    border: 1px solid var(--baseline); border-radius: 8px;
+    background: var(--surface-1); color: var(--text-primary);
+  }
+  button {
+    font: inherit; font-weight: 600; padding: 0.5rem 1rem; cursor: pointer;
+    border: none; border-radius: 8px; background: var(--series-1); color: #fff;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .unit-toggle {
+    display: inline-flex; border: 1px solid var(--baseline); border-radius: 8px; overflow: hidden;
+  }
+  .unit-toggle button {
+    background: transparent; color: var(--text-secondary); font-weight: 500;
+    border-radius: 0; padding: 0.5rem 0.75rem;
+  }
+  .unit-toggle button[aria-pressed="true"] { background: var(--series-1); color: #fff; font-weight: 600; }
+
+  #status { margin: 1rem 0; color: var(--text-secondary); min-height: 1.5em; }
+  #status.error { color: #d03b3b; }
+
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.25rem; margin-top: 1rem;
+  }
+  .card h2 { margin-top: 0; }
+  .card .note { color: var(--text-muted); font-size: 0.85rem; margin-top: 0.75rem; }
+
+  /* ranked bar chart */
+  .chart { display: grid; grid-template-columns: max-content 1fr max-content; row-gap: 6px; column-gap: 10px; align-items: center; }
+  .chart .name { font-size: 0.9rem; text-align: right; white-space: nowrap; }
+  .chart .dup  { color: var(--text-muted); font-size: 0.78rem; }
+  .chart .track { position: relative; height: 18px; border-left: 2px solid var(--baseline); }
+  .chart .bar {
+    position: absolute; inset: 0 auto 0 0; height: 100%;
+    background: var(--series-1); border-radius: 0 4px 4px 0;
+    min-width: 2px;
+  }
+  .chart .row-hit { display: contents; }
+  .chart .val { font-size: 0.9rem; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+
+  /* tooltip */
+  #tip {
+    position: fixed; z-index: 10; pointer-events: none; display: none;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.18); padding: 0.5rem 0.75rem; font-size: 0.82rem;
+    max-width: 20rem;
+  }
+  #tip .t-name { font-weight: 600; margin-bottom: 2px; }
+  #tip .t-row { display: flex; justify-content: space-between; gap: 1rem; color: var(--text-secondary); }
+  #tip .t-row b { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { text-align: right; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--gridline); font-variant-numeric: tabular-nums; }
+  th { color: var(--text-muted); font-weight: 600; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  tr:last-child td { border-bottom: none; }
+
+  .apps { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; font-size: 0.88rem; }
+  .apps dt { font-weight: 600; }
+  .apps dd { color: var(--text-secondary); }
+  @media (max-width: 560px) {
+    .apps { grid-template-columns: 1fr; }
+    .apps dd { margin-bottom: 0.4rem; }
+    .chart .name { white-space: normal; }
+  }
+  .hidden { display: none; }
+  a { color: var(--series-1); }
+  footer { margin-top: 2.5rem; color: var(--text-muted); font-size: 0.82rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>WeatherBetter</h1>
+  <p class="subtitle">Which weather provider actually gets <em>your</em> zip code right? Compares years of archived temperature predictions against what really happened.</p>
+
+  <form id="form">
+    <input type="text" id="zip" inputmode="numeric" placeholder="Zip code, e.g. 84116" autocomplete="postal-code" aria-label="Zip code">
+    <button type="submit" id="go">Rank providers</button>
+    <span class="unit-toggle" role="group" aria-label="Temperature unit">
+      <button type="button" data-unit="F" aria-pressed="true">°F</button>
+      <button type="button" data-unit="C" aria-pressed="false">°C</button>
+    </span>
+  </form>
+
+  <p id="status"></p>
+
+  <section id="results" class="hidden">
+    <div class="card">
+      <h2 id="chart-title"></h2>
+      <div class="chart" id="chart"></div>
+      <p class="note">Mean absolute error of hourly temperature predicted one day ahead, over the whole period. Shorter bar = more accurate. Hover a bar for details.</p>
+    </div>
+
+    <div class="card">
+      <h2>Full results</h2>
+      <div style="overflow-x:auto">
+        <table id="table">
+          <thead>
+            <tr><th>#</th><th>Provider</th><th>MAE d1</th><th>RMSE d1</th><th>Bias d1</th><th>MAE d3</th><th>Hours</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="note"><span id="unit-note"></span>d1 / d3 = predicted one / three days ahead. Positive bias = provider runs warm, negative = runs cold. Providers marked &ldquo;same data as&rdquo; (*) serve another model&rsquo;s output at this location &mdash; regional models fall back to a global model outside their home domain. Providers marked &dagger; have a shorter prediction archive, so they&rsquo;re scored over a sub-period and aren&rsquo;t directly comparable.</p>
+      <p class="note" id="skipped"></p>
+    </div>
+
+    <div class="card">
+      <h2>Which apps use these models?</h2>
+      <p class="note" style="margin-top:0">Consumer apps rarely use one model — most blend several of the models ranked above with their own post-processing. The ranking compares the raw ingredients.</p>
+      <dl class="apps" style="margin-top:0.75rem">
+        <dt>Apple Weather</dt><dd>Dark Sky–derived blend: HRRR (NOAA) + ECMWF + GFS and others</dd>
+        <dt>Weather Underground</dt><dd>IBM&rsquo;s The Weather Company (GRAF model + multi-model blend)</dd>
+        <dt>The Weather Channel</dt><dd>Same IBM / The Weather Company engine as Weather Underground</dd>
+        <dt>Google</dt><dd>Licenses The Weather Company data, plus Google&rsquo;s own ML models</dd>
+        <dt>Microsoft / MSN</dt><dd>Microsoft Start weather, multi-model blend (formerly Foreca)</dd>
+        <dt>AccuWeather</dt><dd>Proprietary blend of ~190 models, including ECMWF and GFS</dd>
+        <dt>WeatherBug</dt><dd>Proprietary forecast on its own station network</dd>
+        <dt>Windy / yr.no</dt><dd>ECMWF directly (yr.no is MET Norway)</dd>
+        <dt>NWS / weather.gov</dt><dd>Human forecasters guided by NBM, GFS, and HRRR</dd>
+      </dl>
+    </div>
+  </section>
+
+  <footer>
+    Data: <a href="https://open-meteo.com/">Open-Meteo</a> — predictions from the Previous Runs archive, observations from ERA5 reanalysis (~9&nbsp;km grid, so accuracy is measured against the grid cell containing the zip centroid, not a specific station). All requests run in your browser; nothing is stored.
+  </footer>
+</main>
+
+<div id="tip" role="tooltip"></div>
+
+<script>
+"use strict";
+
+const PROVIDERS = {
+  ecmwf_ifs025:         "ECMWF IFS (EU)",
+  gfs_seamless:         "NOAA GFS/HRRR (US)",
+  icon_seamless:        "DWD ICON (Germany)",
+  gem_seamless:         "ECCC GEM (Canada)",
+  jma_seamless:         "JMA (Japan)",
+  meteofrance_seamless: "Météo-France AROME/ARPEGE",
+  ukmo_seamless:        "UK Met Office",
+  knmi_seamless:        "KNMI Harmonie (Netherlands)",
+  dmi_seamless:         "DMI Harmonie (Denmark)",
+  metno_seamless:       "MET Norway",
+  bom_access_global:    "BOM ACCESS (Australia)",
+  cma_grapes_global:    "CMA GRAPES (China)",
+};
+const LEAD_VARS = ["temperature_2m_previous_day1", "temperature_2m_previous_day3"];
+const MIN_COVERAGE = 0.5;
+
+const $ = (id) => document.getElementById(id);
+let unit = "F";           // display unit; all math is done in °C
+let lastResults = null;   // re-render on unit toggle
+
+const toUnit = (c) => unit === "F" ? c * 1.8 : c;   // error/bias deltas: scale only
+const fmt = (c, signed = false) => {
+  const v = toUnit(c);
+  return (signed && v >= 0 ? "+" : "") + v.toFixed(2);
+};
+
+async function fetchJSON(base, params) {
+  const url = base + "?" + new URLSearchParams(params);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      return await resp.json();
+    } catch (err) {
+      if (attempt === 2) throw err;
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+    }
+  }
+}
+
+function isoDate(d) { return d.toISOString().slice(0, 10); }
+
+function score(times, preds, obsByTime) {
+  let n = 0, sumAbs = 0, sumSq = 0, sum = 0;
+  for (let i = 0; i < times.length; i++) {
+    const p = preds[i], o = obsByTime.get(times[i]);
+    if (p == null || o == null) continue;
+    const e = p - o;
+    n++; sumAbs += Math.abs(e); sumSq += e * e; sum += e;
+  }
+  if (!n) return null;
+  return { n, mae: sumAbs / n, rmse: Math.sqrt(sumSq / n), bias: sum / n };
+}
+
+async function run(zip) {
+  const status = $("status");
+  status.classList.remove("error");
+  $("results").classList.add("hidden");
+  $("go").disabled = true;
+
+  try {
+    status.textContent = "Looking up " + zip + "…";
+    const geo = await fetchJSON("https://geocoding-api.open-meteo.com/v1/search", { name: zip, count: 1 });
+    if (!geo.results?.length) throw new Error("Couldn't find a location for “" + zip + "”.");
+    const { latitude: lat, longitude: lon, name, admin1, country_code } = geo.results[0];
+    const place = [name, admin1, country_code].filter(Boolean).join(", ");
+
+    // ERA5 lags realtime by ~5 days; leave a week of headroom. The window is
+    // the last 3 years, clamped to the start of Open-Meteo's prediction
+    // archive (~Feb 2024) — it grows to a full 3 years as the archive deepens.
+    const end = new Date(Date.now() - 7 * 864e5);
+    const start = new Date(Math.max(end.getTime() - 3 * 365 * 864e5, Date.UTC(2024, 1, 15)));
+    const dates = { start_date: isoDate(start), end_date: isoDate(end) };
+
+    let done = 0;
+    const total = Object.keys(PROVIDERS).length;
+    const tick = () => { status.textContent = `${place} — fetching years of predictions… ${done}/${total} providers`; };
+    tick();
+
+    const observedP = fetchJSON("https://archive-api.open-meteo.com/v1/archive",
+      { latitude: lat, longitude: lon, hourly: "temperature_2m", ...dates });
+
+    const predP = Object.keys(PROVIDERS).map(model =>
+      fetchJSON("https://previous-runs-api.open-meteo.com/v1/forecast",
+        { latitude: lat, longitude: lon, models: model, hourly: LEAD_VARS.join(","), ...dates })
+        .then(data => { done++; tick(); return { model, data }; },
+              err  => { done++; tick(); return { model, err }; })
+    );
+
+    const [obsData, preds] = await Promise.all([observedP, Promise.all(predP)]);
+    const obsByTime = new Map(obsData.hourly.time.map((t, i) => [t, obsData.hourly.temperature_2m[i]]));
+
+    const results = [], skipped = [];
+    for (const { model, data, err } of preds) {
+      const label = PROVIDERS[model];
+      if (err) { skipped.push(`${label}: request failed (${err.message || err})`); continue; }
+      const h = data.hourly ?? {};
+      const times = h.time ?? [];
+      const day1 = h[LEAD_VARS[0]] ?? [];
+      const valid = day1.filter(v => v != null).length;
+      if (!times.length || valid / times.length < MIN_COVERAGE) {
+        skipped.push(`${label}: does not cover this location`);
+        continue;
+      }
+      const s1 = score(times, day1, obsByTime);
+      const s3 = score(times, h[LEAD_VARS[1]] ?? [], obsByTime);
+      if (!s1) { skipped.push(`${label}: no overlap with observations`); continue; }
+      // fingerprint the series so identical fallback data gets flagged
+      let fp = 0;
+      for (let i = 0; i < day1.length; i++) if (day1[i] != null) fp = (fp * 31 + Math.round(day1[i] * 10) + i) | 0;
+      results.push({ name: label, s1, s3, fp });
+    }
+
+    if (!results.length) throw new Error("No providers had usable prediction data for this location.");
+    results.sort((a, b) => a.s1.mae - b.s1.mae);
+
+    const firstByFp = new Map();
+    const maxHours = Math.max(...results.map(r => r.s1.n));
+    for (const r of results) {
+      if (firstByFp.has(r.fp)) r.sameAs = firstByFp.get(r.fp);
+      else firstByFp.set(r.fp, r.name);
+      if (r.s1.n < 0.8 * maxHours) r.partial = Math.round(r.s1.n / maxHours * 100);
+    }
+
+    lastResults = { place, results, skipped, start: dates.start_date, end: dates.end_date };
+    render();
+    status.textContent = "";
+  } catch (err) {
+    status.textContent = err.message || String(err);
+    status.classList.add("error");
+  } finally {
+    $("go").disabled = false;
+  }
+}
+
+function render() {
+  if (!lastResults) return;
+  const { place, results, skipped, start, end } = lastResults;
+  const u = "°" + unit;
+
+  $("chart-title").textContent = `Day-ahead accuracy for ${place} (${start} → ${end})`;
+
+  const chart = $("chart");
+  chart.replaceChildren();
+  const maxMae = Math.max(...results.map(r => r.s1.mae));
+  for (const r of results) {
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = r.name;
+    const annotations = [];
+    if (r.sameAs) annotations.push("same data as " + r.sameAs);
+    if (r.partial) annotations.push("partial archive: " + r.partial + "% of period");
+    for (const text of annotations) {
+      const d = document.createElement("div");
+      d.className = "dup";
+      d.textContent = text;
+      name.appendChild(d);
+    }
+    const track = document.createElement("div");
+    track.className = "track";
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.style.width = (r.s1.mae / maxMae * 100) + "%";
+    track.appendChild(bar);
+    const val = document.createElement("div");
+    val.className = "val";
+    val.textContent = fmt(r.s1.mae) + u;
+
+    for (const el of [name, track, val]) {
+      el.addEventListener("pointerenter", (e) => showTip(e, r, u));
+      el.addEventListener("pointermove", moveTip);
+      el.addEventListener("pointerleave", hideTip);
+    }
+    chart.append(name, track, val);
+  }
+
+  const tbody = $("table").querySelector("tbody");
+  tbody.replaceChildren();
+  results.forEach((r, i) => {
+    const tr = document.createElement("tr");
+    const cells = [
+      i + 1,
+      r.name + (r.sameAs ? " *" : "") + (r.partial ? " †" : ""),
+      fmt(r.s1.mae), fmt(r.s1.rmse), fmt(r.s1.bias, true),
+      r.s3 ? fmt(r.s3.mae) : "n/a",
+      r.s1.n.toLocaleString(),
+    ];
+    for (const c of cells) {
+      const td = document.createElement("td");
+      td.textContent = c;
+      tr.appendChild(td);
+    }
+    const titles = [];
+    if (r.sameAs) titles.push("Same data as " + r.sameAs);
+    if (r.partial) titles.push("Partial archive: " + r.partial + "% of period");
+    if (titles.length) tr.title = titles.join(" — ");
+    tbody.appendChild(tr);
+  });
+
+  $("unit-note").textContent = `Errors in ${u}. `;
+  $("skipped").textContent = skipped.length ? "No usable data here: " + skipped.join(" · ") : "";
+  $("results").classList.remove("hidden");
+}
+
+function showTip(e, r, u) {
+  const tip = $("tip");
+  const row = (k, v) => `<div class="t-row"><span>${k}</span><b>${v}</b></div>`;
+  tip.innerHTML = `<div class="t-name">${r.name}</div>` +
+    row("MAE, 1 day ahead", fmt(r.s1.mae) + u) +
+    row("RMSE, 1 day ahead", fmt(r.s1.rmse) + u) +
+    row("Bias", fmt(r.s1.bias, true) + u + (r.s1.bias > 0 ? " (warm)" : " (cold)")) +
+    (r.s3 ? row("MAE, 3 days ahead", fmt(r.s3.mae) + u) : "") +
+    row("Hours compared", r.s1.n.toLocaleString()) +
+    (r.sameAs ? `<div class="t-row" style="margin-top:2px"><span>Same data as ${r.sameAs}</span></div>` : "") +
+    (r.partial ? `<div class="t-row" style="margin-top:2px"><span>Partial archive: ${r.partial}% of period</span></div>` : "");
+  tip.style.display = "block";
+  moveTip(e);
+}
+function moveTip(e) {
+  const tip = $("tip");
+  const pad = 14;
+  let x = e.clientX + pad, y = e.clientY + pad;
+  const rect = tip.getBoundingClientRect();
+  if (x + rect.width > innerWidth - 8) x = e.clientX - rect.width - pad;
+  if (y + rect.height > innerHeight - 8) y = e.clientY - rect.height - pad;
+  tip.style.left = x + "px";
+  tip.style.top = y + "px";
+}
+function hideTip() { $("tip").style.display = "none"; }
+
+$("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const zip = $("zip").value.trim();
+  if (!zip) return;
+  const url = new URL(location);
+  url.searchParams.set("zip", zip);
+  history.replaceState(null, "", url);
+  run(zip);
+});
+
+document.querySelectorAll(".unit-toggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    unit = btn.dataset.unit;
+    document.querySelectorAll(".unit-toggle button").forEach(b =>
+      b.setAttribute("aria-pressed", String(b === btn)));
+    render();
+  });
+});
+
+const urlZip = new URLSearchParams(location.search).get("zip");
+if (urlZip) { $("zip").value = urlZip; run(urlZip); }
+</script>
+</body>
+</html>
