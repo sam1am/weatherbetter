@@ -104,6 +104,22 @@
   th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
   tr:last-child td { border-bottom: none; }
 
+  /* winner forecast */
+  .fc-current { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .fc-current .fc-icon { font-size: 2.6rem; line-height: 1; }
+  .fc-current .fc-temp { font-size: 2.2rem; font-weight: 700; letter-spacing: -0.02em; }
+  .fc-current .fc-meta { color: var(--text-secondary); font-size: 0.9rem; }
+  .fc-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.5rem; }
+  .fc-day {
+    border: 1px solid var(--gridline); border-radius: 8px;
+    padding: 0.5rem 0.25rem; text-align: center; font-size: 0.85rem;
+  }
+  .fc-day .d-name { color: var(--text-muted); font-weight: 600; }
+  .fc-day .d-icon { font-size: 1.4rem; margin: 0.15rem 0; }
+  .fc-day .d-hi { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .fc-day .d-lo { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  @media (max-width: 560px) { .fc-days { grid-template-columns: repeat(4, 1fr); } }
+
   .apps { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; font-size: 0.88rem; }
   .apps dt { font-weight: 600; }
   .apps dd { color: var(--text-secondary); }
@@ -152,6 +168,13 @@
       </div>
       <p class="note"><span id="unit-note"></span>d1 / d3 = predicted one / three days ahead. Positive bias = provider runs warm, negative = runs cold. Providers marked &ldquo;same data as&rdquo; (*) serve another model&rsquo;s output at this location &mdash; regional models fall back to a global model outside their home domain. Providers marked &dagger; have a shorter prediction archive, so they&rsquo;re scored over a sub-period and aren&rsquo;t directly comparable.</p>
       <p class="note" id="skipped"></p>
+    </div>
+
+    <div class="card hidden" id="forecast-card">
+      <h2 id="fc-title"></h2>
+      <div class="fc-current" id="fc-current"></div>
+      <div class="fc-days" id="fc-days"></div>
+      <p class="note">Current conditions and the week ahead from the most accurate model for this location.</p>
     </div>
 
     <div class="card">
@@ -207,6 +230,22 @@ const fmt = (c, signed = false) => {
   const v = toUnit(c);
   return (signed && v >= 0 ? "+" : "") + v.toFixed(2);
 };
+const fmtAbs = (c) => Math.round(unit === "F" ? c * 1.8 + 32 : c) + "°";  // actual temperatures
+
+// WMO weather interpretation codes
+const WMO = {
+  0: ["☀️", "Clear"], 1: ["🌤️", "Mostly clear"], 2: ["⛅", "Partly cloudy"], 3: ["☁️", "Overcast"],
+  45: ["🌫️", "Fog"], 48: ["🌫️", "Rime fog"],
+  51: ["🌦️", "Light drizzle"], 53: ["🌦️", "Drizzle"], 55: ["🌧️", "Heavy drizzle"],
+  56: ["🌧️", "Freezing drizzle"], 57: ["🌧️", "Freezing drizzle"],
+  61: ["🌧️", "Light rain"], 63: ["🌧️", "Rain"], 65: ["🌧️", "Heavy rain"],
+  66: ["🌧️", "Freezing rain"], 67: ["🌧️", "Freezing rain"],
+  71: ["🌨️", "Light snow"], 73: ["🌨️", "Snow"], 75: ["❄️", "Heavy snow"], 77: ["🌨️", "Snow grains"],
+  80: ["🌦️", "Light showers"], 81: ["🌧️", "Showers"], 82: ["⛈️", "Heavy showers"],
+  85: ["🌨️", "Snow showers"], 86: ["🌨️", "Snow showers"],
+  95: ["⛈️", "Thunderstorm"], 96: ["⛈️", "Thunderstorm, hail"], 99: ["⛈️", "Thunderstorm, hail"],
+};
+const wmo = (code) => WMO[code] ?? ["🌡️", "—"];
 
 async function fetchJSON(base, params) {
   const url = base + "?" + new URLSearchParams(params);
@@ -292,7 +331,7 @@ async function run(zip) {
       // fingerprint the series so identical fallback data gets flagged
       let fp = 0;
       for (let i = 0; i < day1.length; i++) if (day1[i] != null) fp = (fp * 31 + Math.round(day1[i] * 10) + i) | 0;
-      results.push({ name: label, s1, s3, fp });
+      results.push({ model, name: label, s1, s3, fp });
     }
 
     if (!results.length) throw new Error("No providers had usable prediction data for this location.");
@@ -306,7 +345,21 @@ async function run(zip) {
       if (r.s1.n < 0.8 * maxHours) r.partial = Math.round(r.s1.n / maxHours * 100);
     }
 
-    lastResults = { place, results, skipped, start: dates.start_date, end: dates.end_date };
+    // current weather + week ahead from the winning model
+    let forecast = null;
+    try {
+      const winner = results[0];
+      status.textContent = `Fetching the forecast from the winner (${winner.name})…`;
+      const fc = await fetchJSON("https://api.open-meteo.com/v1/forecast", {
+        latitude: lat, longitude: lon, models: winner.model, timezone: "auto",
+        current: "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m",
+        daily: "temperature_2m_max,temperature_2m_min,weather_code",
+        forecast_days: 7,
+      });
+      if (fc.current && fc.daily) forecast = { name: winner.name, current: fc.current, daily: fc.daily };
+    } catch { /* the ranking is still useful without the forecast card */ }
+
+    lastResults = { place, results, skipped, forecast, start: dates.start_date, end: dates.end_date };
     render();
     status.textContent = "";
   } catch (err) {
@@ -383,7 +436,54 @@ function render() {
 
   $("unit-note").textContent = `Errors in ${u}. `;
   $("skipped").textContent = skipped.length ? "No usable data here: " + skipped.join(" · ") : "";
+
+  renderForecast();
   $("results").classList.remove("hidden");
+}
+
+function renderForecast() {
+  const fc = lastResults.forecast;
+  $("forecast-card").classList.toggle("hidden", !fc);
+  if (!fc) return;
+
+  $("fc-title").textContent = `Right now, from the winner: ${fc.name}`;
+
+  const [icon, desc] = wmo(fc.current.weather_code);
+  const wind = unit === "F"
+    ? Math.round(fc.current.wind_speed_10m * 0.621) + " mph"
+    : Math.round(fc.current.wind_speed_10m) + " km/h";
+  const cur = $("fc-current");
+  cur.replaceChildren();
+  const mk = (cls, text) => {
+    const d = document.createElement("div");
+    d.className = cls;
+    d.textContent = text;
+    return d;
+  };
+  cur.append(
+    mk("fc-icon", icon),
+    mk("fc-temp", fmtAbs(fc.current.temperature_2m)),
+    mk("fc-meta", `${desc} · feels like ${fmtAbs(fc.current.apparent_temperature)} · ` +
+                  `wind ${wind} · humidity ${Math.round(fc.current.relative_humidity_2m)}%`),
+  );
+
+  const days = $("fc-days");
+  days.replaceChildren();
+  fc.daily.time.forEach((date, i) => {
+    const [dIcon, dDesc] = wmo(fc.daily.weather_code[i]);
+    const day = document.createElement("div");
+    day.className = "fc-day";
+    day.title = dDesc;
+    const weekday = i === 0 ? "Today"
+      : new Date(date + "T12:00").toLocaleDateString(undefined, { weekday: "short" });
+    day.append(
+      mk("d-name", weekday),
+      mk("d-icon", dIcon),
+      mk("d-hi", fmtAbs(fc.daily.temperature_2m_max[i])),
+      mk("d-lo", fmtAbs(fc.daily.temperature_2m_min[i])),
+    );
+    days.appendChild(day);
+  });
 }
 
 function showTip(e, r, u) {
