@@ -6,10 +6,11 @@ Uses only Open-Meteo APIs (no API key required, stdlib only):
   - Previous Runs API      -> what each model *predicted*, archived per day
   - Historical (ERA5) API  -> what was actually *observed*
 
-For each provider we pull up to the last 3 years of day-1 and day-3-ahead
-hourly temperature predictions (Open-Meteo's prediction archive reaches back
-to Feb 2024), compare them against ERA5 reanalysis, and rank providers by
-day-1 mean absolute error.
+For each provider we pull up to the last 3 years of hourly temperature
+predictions made 1, 3, 5, and 7 days ahead (Open-Meteo's prediction archive
+reaches back to Feb 2024 and stores leads up to 7 days — nothing longer
+exists), compare them against ERA5 reanalysis, and rank providers by mean
+absolute error at each lead time.
 
 Usage:  python3 forecast_accuracy.py [zipcode] [--celsius]
         (errors are reported in deg F by default)
@@ -42,7 +43,8 @@ PROVIDERS = {
     "cma_grapes_global":    "CMA GRAPES (China)",
 }
 
-LEAD_VARS = ["temperature_2m_previous_day1", "temperature_2m_previous_day3"]
+LEAD_DAYS = [1, 3, 5, 7]  # the archive stores nothing beyond 7-day leads
+LEAD_VARS = [f"temperature_2m_previous_day{d}" for d in LEAD_DAYS]
 MIN_COVERAGE = 0.5  # fraction of hours that must be non-null to count as "covers this location"
 MAX_CONCURRENT_REQUESTS = 6  # stay polite to the free API
 WINDOW_DAYS = 3 * 365
@@ -66,7 +68,7 @@ How this maps to the weather apps you know (each blends multiple models):
 The rankings above compare the raw model ingredients these apps are built from."""
 
 
-def fetch_json(base_url, params, retries=3):
+def fetch_json(base_url, params, retries=4):
     url = base_url + "?" + urllib.parse.urlencode(params)
     for attempt in range(retries):
         try:
@@ -75,7 +77,9 @@ def fetch_json(base_url, params, retries=3):
         except Exception as exc:
             if attempt == retries - 1:
                 raise
-            time.sleep(2 * (attempt + 1))
+            # rate limits (HTTP 429) need a real pause, not a quick retry
+            rate_limited = getattr(exc, "code", None) == 429
+            time.sleep(8 * (attempt + 1) if rate_limited else 2 * (attempt + 1))
 
 
 def geocode_zip(zipcode):
@@ -92,7 +96,7 @@ def geocode_zip(zipcode):
 
 
 def fetch_predictions(model, lat, lon, start, end):
-    """Hourly temps this model predicted 1 and 3 days in advance."""
+    """Hourly temps this model predicted 1/3/5/7 days in advance."""
     data = fetch_json(
         "https://previous-runs-api.open-meteo.com/v1/forecast",
         {
@@ -188,15 +192,17 @@ def main():
             skipped.append((name, "does not cover this location (or too little archived data)"))
             continue
 
-        s1 = score(day1, observed)
-        s3 = score(preds["temperature_2m_previous_day3"], observed)
-        if s1 is None:
+        scores = {
+            d: score(preds[f"temperature_2m_previous_day{d}"], observed)
+            for d in LEAD_DAYS
+        }
+        if scores[1] is None:
             skipped.append((name, "no overlapping data with observations"))
             continue
         # Fingerprint the prediction series: outside a provider's regional
         # domain its "seamless" product may serve another model's data.
         fingerprint = hash(tuple(sorted(day1.items())))
-        results.append((name, s1, s3, fingerprint))
+        results.append((name, scores, fingerprint))
 
     if skipped:
         print("\nProviders without usable data for this location:")
@@ -206,33 +212,41 @@ def main():
     if not results:
         sys.exit("\nNo providers had usable prediction data for this location.")
 
-    results.sort(key=lambda r: r[1]["mae"])
-
     print(f"\n{len(results)} providers cover this location.")
-    print("Ranked by day-ahead temperature accuracy (lower MAE = better):\n")
-    header = f"{'Rank':<5}{'Provider':<28}{'MAE d1':>8}{'RMSE d1':>9}{'Bias d1':>9}{'MAE d3':>8}{'Hours':>8}"
-    print(header)
-    print("-" * len(header))
-    max_hours = max(s1["n"] for _, s1, _, _ in results)
-    first_with_fingerprint = {}
-    for rank, (name, s1, s3, fingerprint) in enumerate(results, 1):
-        mae3 = f"{s3['mae'] * scale:.2f}" if s3 else "n/a"
-        notes = []
-        if fingerprint in first_with_fingerprint:
-            notes.append(f"same data as {first_with_fingerprint[fingerprint]}")
-        else:
-            first_with_fingerprint[fingerprint] = name
-        if s1["n"] < 0.8 * max_hours:
-            notes.append(f"partial archive: {s1['n'] / max_hours:.0%} of period")
-        note = f"  ({'; '.join(notes)})" if notes else ""
-        print(
-            f"{rank:<5}{name:<28}{s1['mae'] * scale:>8.2f}{s1['rmse'] * scale:>9.2f}"
-            f"{s1['bias'] * scale:>+9.2f}{mae3:>8}{s1['n']:>8}{note}"
+
+    for lead in LEAD_DAYS:
+        ranked = sorted(
+            (r for r in results if r[1][lead] is not None),
+            key=lambda r: r[1][lead]["mae"],
         )
+        if not ranked:
+            continue
+        print(f"\n=== Predicted {lead} day{'s' if lead > 1 else ''} ahead "
+              f"(lower MAE = better) ===\n")
+        header = f"{'Rank':<5}{'Provider':<28}{'MAE':>8}{'RMSE':>9}{'Bias':>9}{'Hours':>8}"
+        print(header)
+        print("-" * len(header))
+        max_hours = max(r[1][lead]["n"] for r in ranked)
+        first_with_fingerprint = {}
+        for rank, (name, scores, fingerprint) in enumerate(ranked, 1):
+            s = scores[lead]
+            notes = []
+            if fingerprint in first_with_fingerprint:
+                notes.append(f"same data as {first_with_fingerprint[fingerprint]}")
+            else:
+                first_with_fingerprint[fingerprint] = name
+            if s["n"] < 0.8 * max_hours:
+                notes.append(f"partial archive: {s['n'] / max_hours:.0%} of period")
+            note = f"  ({'; '.join(notes)})" if notes else ""
+            print(
+                f"{rank:<5}{name:<28}{s['mae'] * scale:>8.2f}{s['rmse'] * scale:>9.2f}"
+                f"{s['bias'] * scale:>+9.2f}{s['n']:>8}{note}"
+            )
+
     print(
         f"\nMAE/RMSE/Bias in deg {unit}"
         + ("" if celsius else " (run with --celsius for deg C)")
-        + ". d1/d3 = predicted 1/3 days ahead."
+        + ". Leads beyond 7 days are not archived anywhere."
         "\nPositive bias = provider runs warm; negative = runs cold."
         "\n'same data as X' = this provider serves another model's output here"
         "\n(regional models fall back to a global model outside their domain)."

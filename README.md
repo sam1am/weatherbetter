@@ -4,7 +4,8 @@ Which weather provider actually gets *your* zip code right?
 
 Compares up to three years of archived hourly temperature predictions from ~12
 forecast models (ECMWF, NOAA GFS, DWD ICON, UK Met Office, JMA, …) against what
-actually happened, and ranks them by accuracy for a given zip code. All data
+actually happened, and ranks them by accuracy for a given zip code — at 1, 3,
+5, and 7-day lead times (7 days is the longest lead any archive stores). All data
 comes from free, keyless [Open-Meteo](https://open-meteo.com/) APIs:
 
 - **Previous Runs API** — what each model predicted, 1 and 3 days ahead
@@ -28,8 +29,8 @@ No dependencies beyond the Python 3 standard library.
 
 ## Reading the results
 
-- **MAE d1 / d3** — mean absolute error of temperatures predicted 1 / 3 days
-  ahead. Lower is better.
+- **MAE 1d/3d/5d/7d** — mean absolute error of temperatures predicted that many
+  days ahead. Lower is better.
 - **Bias** — positive = provider runs warm, negative = runs cold.
 - **same data as X** — outside a regional model's home domain, its "seamless"
   product serves another model's output; identical series are flagged so one

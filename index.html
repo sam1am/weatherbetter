@@ -55,14 +55,19 @@
     border: none; border-radius: 8px; background: var(--series-1); color: #fff;
   }
   button:disabled { opacity: 0.5; cursor: default; }
-  .unit-toggle {
+  .unit-toggle, .lead-toggle {
     display: inline-flex; border: 1px solid var(--baseline); border-radius: 8px; overflow: hidden;
   }
-  .unit-toggle button {
+  .unit-toggle button, .lead-toggle button {
     background: transparent; color: var(--text-secondary); font-weight: 500;
     border-radius: 0; padding: 0.5rem 0.75rem;
   }
-  .unit-toggle button[aria-pressed="true"] { background: var(--series-1); color: #fff; font-weight: 600; }
+  .unit-toggle button[aria-pressed="true"], .lead-toggle button[aria-pressed="true"] {
+    background: var(--series-1); color: #fff; font-weight: 600;
+  }
+  .lead-toggle { margin-bottom: 1rem; }
+  .lead-toggle button { font-size: 0.85rem; padding: 0.35rem 0.7rem; }
+  .lead-label { color: var(--text-muted); font-size: 0.85rem; margin-right: 0.5rem; }
 
   #status { margin: 1rem 0; color: var(--text-secondary); min-height: 1.5em; }
   #status.error { color: #d03b3b; }
@@ -152,21 +157,29 @@
   <section id="results" class="hidden">
     <div class="card">
       <h2 id="chart-title"></h2>
+      <div>
+        <span class="lead-label">Predictions made</span>
+        <span class="lead-toggle" role="group" aria-label="Forecast lead time" id="lead-toggle">
+          <button type="button" data-lead="1" aria-pressed="true">1 day</button>
+          <button type="button" data-lead="3" aria-pressed="false">3 days</button>
+          <button type="button" data-lead="5" aria-pressed="false">5 days</button>
+          <button type="button" data-lead="7" aria-pressed="false">7 days</button>
+        </span>
+        <span class="lead-label" style="margin-left:0.5rem">ahead</span>
+      </div>
       <div class="chart" id="chart"></div>
-      <p class="note">Mean absolute error of hourly temperature predicted one day ahead, over the whole period. Shorter bar = more accurate. Hover a bar for details.</p>
+      <p class="note">Mean absolute error of hourly temperature at the selected lead time, over the whole period. Shorter bar = more accurate. Hover a bar for details. Open-Meteo's archive stores leads up to 7 days; longer leads aren't archived anywhere.</p>
     </div>
 
     <div class="card">
       <h2>Full results</h2>
       <div style="overflow-x:auto">
         <table id="table">
-          <thead>
-            <tr><th>#</th><th>Provider</th><th>MAE d1</th><th>RMSE d1</th><th>Bias d1</th><th>MAE d3</th><th>Hours</th></tr>
-          </thead>
+          <thead><tr id="table-head"></tr></thead>
           <tbody></tbody>
         </table>
       </div>
-      <p class="note"><span id="unit-note"></span>d1 / d3 = predicted one / three days ahead. Positive bias = provider runs warm, negative = runs cold. Providers marked &ldquo;same data as&rdquo; (*) serve another model&rsquo;s output at this location &mdash; regional models fall back to a global model outside their home domain. Providers marked &dagger; have a shorter prediction archive, so they&rsquo;re scored over a sub-period and aren&rsquo;t directly comparable.</p>
+      <p class="note"><span id="unit-note"></span>Positive bias = provider runs warm, negative = runs cold. Providers marked &ldquo;same data as&rdquo; (*) serve another model&rsquo;s output at this location &mdash; regional models fall back to a global model outside their home domain. Providers marked &dagger; have a shorter prediction archive, so they&rsquo;re scored over a sub-period and aren&rsquo;t directly comparable.</p>
       <p class="note" id="skipped"></p>
     </div>
 
@@ -218,12 +231,16 @@ const PROVIDERS = {
   bom_access_global:    "BOM ACCESS (Australia)",
   cma_grapes_global:    "CMA GRAPES (China)",
 };
-const LEAD_VARS = ["temperature_2m_previous_day1", "temperature_2m_previous_day3"];
+const LEAD_DAYS = [1, 3, 5, 7];  // the archive stores nothing beyond 7-day leads
+const LEAD_VARS = LEAD_DAYS.map(d => `temperature_2m_previous_day${d}`);
 const MIN_COVERAGE = 0.5;
 
 const $ = (id) => document.getElementById(id);
 let unit = "F";           // display unit; all math is done in °C
-let lastResults = null;   // re-render on unit toggle
+let lead = 1;             // selected lead time (days ahead)
+let lastResults = null;   // re-render on unit/lead toggle
+const fcCache = new Map();  // model -> forecast payload
+let fcSeq = 0;            // guards against out-of-order forecast renders
 
 const toUnit = (c) => unit === "F" ? c * 1.8 : c;   // error/bias deltas: scale only
 const fmt = (c, signed = false) => {
@@ -249,14 +266,21 @@ const wmo = (code) => WMO[code] ?? ["🌡️", "—"];
 
 async function fetchJSON(base, params) {
   const url = base + "?" + new URLSearchParams(params);
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const attempts = 4;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let rateLimited = false;
     try {
       const resp = await fetch(url);
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      if (!resp.ok) {
+        rateLimited = resp.status === 429;
+        throw new Error("HTTP " + resp.status);
+      }
       return await resp.json();
     } catch (err) {
-      if (attempt === 2) throw err;
-      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+      if (attempt === attempts - 1) throw err;
+      // rate limits need a real pause, not a quick retry
+      const delay = rateLimited ? 8000 * (attempt + 1) : 1500 * (attempt + 1);
+      await new Promise(r => setTimeout(r, delay));
     }
   }
 }
@@ -325,41 +349,19 @@ async function run(zip) {
         skipped.push(`${label}: does not cover this location`);
         continue;
       }
-      const s1 = score(times, day1, obsByTime);
-      const s3 = score(times, h[LEAD_VARS[1]] ?? [], obsByTime);
-      if (!s1) { skipped.push(`${label}: no overlap with observations`); continue; }
+      const scores = {};
+      for (const d of LEAD_DAYS) scores[d] = score(times, h[`temperature_2m_previous_day${d}`] ?? [], obsByTime);
+      if (!scores[1]) { skipped.push(`${label}: no overlap with observations`); continue; }
       // fingerprint the series so identical fallback data gets flagged
       let fp = 0;
       for (let i = 0; i < day1.length; i++) if (day1[i] != null) fp = (fp * 31 + Math.round(day1[i] * 10) + i) | 0;
-      results.push({ model, name: label, s1, s3, fp });
+      results.push({ model, name: label, scores, fp });
     }
 
     if (!results.length) throw new Error("No providers had usable prediction data for this location.");
-    results.sort((a, b) => a.s1.mae - b.s1.mae);
 
-    const firstByFp = new Map();
-    const maxHours = Math.max(...results.map(r => r.s1.n));
-    for (const r of results) {
-      if (firstByFp.has(r.fp)) r.sameAs = firstByFp.get(r.fp);
-      else firstByFp.set(r.fp, r.name);
-      if (r.s1.n < 0.8 * maxHours) r.partial = Math.round(r.s1.n / maxHours * 100);
-    }
-
-    // current weather + week ahead from the winning model
-    let forecast = null;
-    try {
-      const winner = results[0];
-      status.textContent = `Fetching the forecast from the winner (${winner.name})…`;
-      const fc = await fetchJSON("https://api.open-meteo.com/v1/forecast", {
-        latitude: lat, longitude: lon, models: winner.model, timezone: "auto",
-        current: "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m",
-        daily: "temperature_2m_max,temperature_2m_min,weather_code",
-        forecast_days: 7,
-      });
-      if (fc.current && fc.daily) forecast = { name: winner.name, current: fc.current, daily: fc.daily };
-    } catch { /* the ranking is still useful without the forecast card */ }
-
-    lastResults = { place, results, skipped, forecast, start: dates.start_date, end: dates.end_date };
+    lastResults = { place, lat, lon, results, skipped, start: dates.start_date, end: dates.end_date };
+    fcCache.clear();
     render();
     status.textContent = "";
   } catch (err) {
@@ -375,12 +377,24 @@ function render() {
   const { place, results, skipped, start, end } = lastResults;
   const u = "°" + unit;
 
-  $("chart-title").textContent = `Day-ahead accuracy for ${place} (${start} → ${end})`;
+  // rank by MAE at the selected lead; annotations depend on the ordering
+  const ranked = results.filter(r => r.scores[lead]).sort((a, b) => a.scores[lead].mae - b.scores[lead].mae);
+  const firstByFp = new Map();
+  const maxHours = Math.max(...ranked.map(r => r.scores[lead].n));
+  for (const r of ranked) {
+    r.sameAs = firstByFp.has(r.fp) ? firstByFp.get(r.fp) : null;
+    if (!r.sameAs) firstByFp.set(r.fp, r.name);
+    const n = r.scores[lead].n;
+    r.partial = n < 0.8 * maxHours ? Math.round(n / maxHours * 100) : null;
+  }
+
+  $("chart-title").textContent = `Forecast accuracy for ${place} (${start} → ${end})`;
 
   const chart = $("chart");
   chart.replaceChildren();
-  const maxMae = Math.max(...results.map(r => r.s1.mae));
-  for (const r of results) {
+  const maxMae = Math.max(...ranked.map(r => r.scores[lead].mae));
+  for (const r of ranked) {
+    const s = r.scores[lead];
     const name = document.createElement("div");
     name.className = "name";
     name.textContent = r.name;
@@ -397,11 +411,11 @@ function render() {
     track.className = "track";
     const bar = document.createElement("div");
     bar.className = "bar";
-    bar.style.width = (r.s1.mae / maxMae * 100) + "%";
+    bar.style.width = (s.mae / maxMae * 100) + "%";
     track.appendChild(bar);
     const val = document.createElement("div");
     val.className = "val";
-    val.textContent = fmt(r.s1.mae) + u;
+    val.textContent = fmt(s.mae) + u;
 
     for (const el of [name, track, val]) {
       el.addEventListener("pointerenter", (e) => showTip(e, r, u));
@@ -411,22 +425,33 @@ function render() {
     chart.append(name, track, val);
   }
 
+  const thead = $("table-head");
+  thead.replaceChildren();
+  for (const h of ["#", "Provider", ...LEAD_DAYS.map(d => `MAE ${d}d`), "RMSE", "Bias", "Hours"]) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    if (h === `MAE ${lead}d`) th.style.color = "var(--text-primary)";
+    thead.appendChild(th);
+  }
+
   const tbody = $("table").querySelector("tbody");
   tbody.replaceChildren();
-  results.forEach((r, i) => {
+  ranked.forEach((r, i) => {
+    const s = r.scores[lead];
     const tr = document.createElement("tr");
     const cells = [
       i + 1,
       r.name + (r.sameAs ? " *" : "") + (r.partial ? " †" : ""),
-      fmt(r.s1.mae), fmt(r.s1.rmse), fmt(r.s1.bias, true),
-      r.s3 ? fmt(r.s3.mae) : "n/a",
-      r.s1.n.toLocaleString(),
+      ...LEAD_DAYS.map(d => r.scores[d] ? fmt(r.scores[d].mae) : "–"),
+      fmt(s.rmse), fmt(s.bias, true),
+      s.n.toLocaleString(),
     ];
-    for (const c of cells) {
+    cells.forEach((c, ci) => {
       const td = document.createElement("td");
       td.textContent = c;
+      if (ci === 2 + LEAD_DAYS.indexOf(lead)) td.style.fontWeight = "600";
       tr.appendChild(td);
-    }
+    });
     const titles = [];
     if (r.sameAs) titles.push("Same data as " + r.sameAs);
     if (r.partial) titles.push("Partial archive: " + r.partial + "% of period");
@@ -434,19 +459,35 @@ function render() {
     tbody.appendChild(tr);
   });
 
-  $("unit-note").textContent = `Errors in ${u}. `;
+  $("unit-note").textContent = `Errors in ${u}. RMSE, bias, and hours are for the selected lead time. `;
   $("skipped").textContent = skipped.length ? "No usable data here: " + skipped.join(" · ") : "";
 
-  renderForecast();
+  if (ranked.length) ensureForecast(ranked[0]);
   $("results").classList.remove("hidden");
 }
 
-function renderForecast() {
-  const fc = lastResults.forecast;
+async function ensureForecast(winner) {
+  const seq = ++fcSeq;
+  let fc = fcCache.get(winner.model);
+  if (!fc) {
+    try {
+      fc = await fetchJSON("https://api.open-meteo.com/v1/forecast", {
+        latitude: lastResults.lat, longitude: lastResults.lon, models: winner.model, timezone: "auto",
+        current: "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m",
+        daily: "temperature_2m_max,temperature_2m_min,weather_code",
+        forecast_days: 7,
+      });
+      if (!fc.current || !fc.daily) fc = null;
+      else fcCache.set(winner.model, fc);
+    } catch { fc = null; }
+    if (seq !== fcSeq) return;  // a newer selection superseded this fetch
+  }
   $("forecast-card").classList.toggle("hidden", !fc);
-  if (!fc) return;
+  if (fc) renderForecast({ name: winner.name, current: fc.current, daily: fc.daily });
+}
 
-  $("fc-title").textContent = `Right now, from the winner: ${fc.name}`;
+function renderForecast(fc) {
+  $("fc-title").textContent = `Right now, from the ${lead}-day winner: ${fc.name}`;
 
   const [icon, desc] = wmo(fc.current.weather_code);
   const wind = unit === "F"
@@ -488,13 +529,15 @@ function renderForecast() {
 
 function showTip(e, r, u) {
   const tip = $("tip");
-  const row = (k, v) => `<div class="t-row"><span>${k}</span><b>${v}</b></div>`;
+  const s = r.scores[lead];
+  const row = (k, v, hl) => `<div class="t-row"><span>${k}</span><b${hl ? "" : ' style="font-weight:500"'}>${v}</b></div>`;
   tip.innerHTML = `<div class="t-name">${r.name}</div>` +
-    row("MAE, 1 day ahead", fmt(r.s1.mae) + u) +
-    row("RMSE, 1 day ahead", fmt(r.s1.rmse) + u) +
-    row("Bias", fmt(r.s1.bias, true) + u + (r.s1.bias > 0 ? " (warm)" : " (cold)")) +
-    (r.s3 ? row("MAE, 3 days ahead", fmt(r.s3.mae) + u) : "") +
-    row("Hours compared", r.s1.n.toLocaleString()) +
+    LEAD_DAYS.map(d => r.scores[d]
+      ? row(`MAE, ${d} day${d > 1 ? "s" : ""} ahead`, fmt(r.scores[d].mae) + u, d === lead)
+      : "").join("") +
+    row(`RMSE, ${lead}-day`, fmt(s.rmse) + u, true) +
+    row(`Bias, ${lead}-day`, fmt(s.bias, true) + u + (s.bias > 0 ? " (warm)" : " (cold)"), true) +
+    row("Hours compared", s.n.toLocaleString(), true) +
     (r.sameAs ? `<div class="t-row" style="margin-top:2px"><span>Same data as ${r.sameAs}</span></div>` : "") +
     (r.partial ? `<div class="t-row" style="margin-top:2px"><span>Partial archive: ${r.partial}% of period</span></div>` : "");
   tip.style.display = "block";
@@ -526,6 +569,15 @@ document.querySelectorAll(".unit-toggle button").forEach(btn => {
   btn.addEventListener("click", () => {
     unit = btn.dataset.unit;
     document.querySelectorAll(".unit-toggle button").forEach(b =>
+      b.setAttribute("aria-pressed", String(b === btn)));
+    render();
+  });
+});
+
+document.querySelectorAll("#lead-toggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    lead = Number(btn.dataset.lead);
+    document.querySelectorAll("#lead-toggle button").forEach(b =>
       b.setAttribute("aria-pressed", String(b === btn)));
     render();
   });
